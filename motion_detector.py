@@ -83,7 +83,16 @@ def detect_motion_and_objects(video_path, position=0):
 
         # Прогресс-бар для кадров в одном файле
         with tqdm(total=total_frames, desc=os.path.basename(video_path), position=position+1, leave=False) as pbar:
-            while ret and not cv2.getWindowProperty("Video", cv2.WND_PROP_VISIBLE) < 0:
+            while ret:
+                # Пропуск кадров для ускорения
+                if frame_count % PLAYBACK_SPEED != 0:
+                    # Просто читаем следующий кадр без обработки
+                    frame1 = frame2
+                    ret, frame2 = cap.read()
+                    frame_count += 1
+                    pbar.update(1)
+                    continue
+
                 diff = cv2.absdiff(frame1, frame2)
                 gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
                 blur = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -108,34 +117,30 @@ def detect_motion_and_objects(video_path, position=0):
                             cv2.putText(frame2, f"{class_name} {conf:.2f}", (x1, y1 - 10),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-                            # Лог
                             ts = frame_count / fps
                             logging.info(f"🧍 {class_name} ({conf:.2f}) в {video_path}, {ts:.2f} сек")
                             detections.append((video_path, ts, class_name, conf))
 
-                            # Сохраняем кадр
                             if SAVE_FRAMES and (time.time() - last_save_time >= SAVE_DELAY_SEC):
                                 frame_file = os.path.join(FRAMES_DIR, f"{os.path.basename(video_path)}_{ts:.2f}_{class_name}.jpg")
                                 cv2.imwrite(frame_file, frame2)
                                 last_save_time = time.time()
 
-                            # Запись в CSV
                             with open(OUTPUT_FILE, mode="a", newline="", encoding="utf-8") as f:
                                 writer = csv.writer(f)
                                 writer.writerow([video_path, ts, class_name, f"{conf:.2f}"])
-
-                            break  # чтобы не логгировать один и тот же объект несколько раз за кадр
+                            break
 
                 if SHOW_WINDOW:
                     resized = cv2.resize(frame2, (0, 0), fx=WINDOW_SCALE, fy=WINDOW_SCALE)
                     cv2.imshow("Video", resized)
-                    if cv2.waitKey(int(1000 / (fps * PLAYBACK_SPEED))) & 0xFF == ord("q"):
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
                         break
 
                 frame1 = frame2
                 ret, frame2 = cap.read()
                 frame_count += 1
-                pbar.update(1)  # обновляем прогресс-бар
+                pbar.update(1)
 
         cap.release()
         logging.info(f"✅ Завершена обработка {video_path}")
