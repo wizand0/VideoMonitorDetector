@@ -131,12 +131,30 @@ def viewer_thread():
             blank = np.zeros((300, 500, 3), dtype=np.uint8)
             cv2.putText(blank, "Waiting for events... (press Q to close)",
                         (15, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 180), 2)
-            cv2.imshow(VIEW_WINDOW, blank)
+
+            # # === Отображение статуса и подсказок ===
+            # status_text = f"Status: {current_status}"
+            # cv2.putText(blank, status_text, (10, 30),
+            #             cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+            #
+            # help_text = "Waiting for events... (press Q=quit, SPACE=toggle/pause)"
+            # cv2.putText(blank, help_text, (10, blank.shape[0] - 10),
+            #             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+            #
+            # cv2.imshow(VIEW_WINDOW, blank)
 
         key = cv2.waitKey(1) & 0xFF
         if key in (ord('q'), ord('Q')):
             _view_stop.set()
             break
+
+        # if key == ord("q"):
+        #     break
+        # elif key == 32:  # Space
+        #     if current_status == "Idle":
+        #         current_status = "Primed"
+        #     else:
+        #         current_status = "Idle"
 
     cv2.destroyWindow(VIEW_WINDOW)
 
