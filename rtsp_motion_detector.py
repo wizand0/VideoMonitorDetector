@@ -154,8 +154,21 @@ def detect_motion_and_objects(camera_name, rtsp_url):
                         update_display(frame2)
 
                         # Сохранение кадра
+                        # if SAVE_FRAMES and (time.time() - last_save_time >= SAVE_DELAY_SEC):
+                        #     frame_file = os.path.join(FRAMES_DIR, f"{camera_name}_{ts.replace(':','-')}_{class_name}.jpg")
+                        #     cv2.imwrite(frame_file, frame2)
+                        #     last_save_time = time.time()
+
+                        # сохранение кадров в поддерикторию с именем в виде текущей даты
                         if SAVE_FRAMES and (time.time() - last_save_time >= SAVE_DELAY_SEC):
-                            frame_file = os.path.join(FRAMES_DIR, f"{camera_name}_{ts.replace(':','-')}_{class_name}.jpg")
+                            date_dir = time.strftime("%Y%m%d")  # формат 20250818
+                            save_dir = os.path.join(FRAMES_DIR, date_dir)
+                            os.makedirs(save_dir, exist_ok=True)
+
+                            frame_file = os.path.join(
+                                save_dir,
+                                f"{camera_name}_{ts.replace(':', '-')}_{class_name}.jpg"
+                            )
                             cv2.imwrite(frame_file, frame2)
                             last_save_time = time.time()
 
