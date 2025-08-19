@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 rtsp_motion_detector_with_vector.py
 Реагирует только если человек прошёл из зоны START в зону FINISH.
@@ -60,6 +59,55 @@ os.makedirs(FRAMES_DIR, exist_ok=True)
 PLAY_ALARM = False
 SHOW_WINDOW = True  # включаем UI-поток показа срабатываний
 
+# <<< Глобальное состояние и блокировка для потокобезопасности
+_state_lock = threading.Lock()
+OP_MODE = "Primed"     # "Primed" — работает; "Idle" — пауза триггеров
+VIEW_ENABLED = True    # показ кадров включён/выключен горячей клавишей
+_last_trigger_mark_until = 0.0  # до какого времени писать "TRIGGERED" в статусе
+
+def _set_mode(new_mode: str):
+    global OP_MODE
+    with _state_lock:
+        OP_MODE = new_mode
+
+def _get_mode() -> str:
+    with _state_lock:
+        return OP_MODE
+
+def _toggle_mode():
+    with _state_lock:
+        global OP_MODE
+        OP_MODE = "Idle" if OP_MODE == "Primed" else "Primed"
+        return OP_MODE
+
+def _toggle_alarm():
+    global PLAY_ALARM
+    with _state_lock:
+        PLAY_ALARM = not PLAY_ALARM
+        return PLAY_ALARM
+
+def _toggle_view():
+    global VIEW_ENABLED
+    with _state_lock:
+        VIEW_ENABLED = not VIEW_ENABLED
+        return VIEW_ENABLED
+
+def _mark_triggered(duration_sec=2.0):
+    global _last_trigger_mark_until
+    with _state_lock:
+        _last_trigger_mark_until = time.time() + duration_sec
+
+def _status_line():
+    with _state_lock:
+        mode = OP_MODE
+        alarm = "ON" if PLAY_ALARM else "OFF"
+        view = "ON" if VIEW_ENABLED else "OFF"
+        trig = "TRIGGERED" if time.time() < _last_trigger_mark_until else ""
+    parts = [f"Mode: {mode}", f"Alarm: {alarm}", f"Display: {view}"]
+    if trig:
+        parts.append(trig)
+    return " | ".join(parts)
+
 # YOLO
 logging.info("📦 Загружаю модель YOLOv8...")
 model = YOLO(YOLO_MODEL)
@@ -105,6 +153,7 @@ def in_zone(point, rect):
 # ===================== ОКНО-ПРОСМОТРЩИК (UI-поток) =====================
 _view_queue: "Queue[np.ndarray]" = Queue(maxsize=8)
 _view_stop = threading.Event()
+
 def viewer_thread():
     cv2.namedWindow(VIEW_WINDOW, cv2.WINDOW_NORMAL)
     last_img = None
@@ -112,49 +161,54 @@ def viewer_thread():
     hold_sec = 2.0  # показываем кадр 2 секунды
 
     while not _view_stop.is_set():
+        # гор. клавиши читаем тут же
+        key = cv2.waitKey(1) & 0xFF
+        if key in (ord('q'), ord('Q')):
+            _view_stop.set()
+            break
+        elif key == 32:  # SPACE — toggle mode Idle/Primed
+            new_mode = _toggle_mode()
+            logging.info(f"🔄 Mode → {new_mode}")
+        elif key in (ord('a'), ord('A')):  # A — toggle alarm
+            s = _toggle_alarm()
+            logging.info(f"🔔 Alarm {'ON' if s else 'OFF'}")
+        elif key in (ord('w'), ord('W')):  # W — toggle display
+            s = _toggle_view()
+            logging.info(f"🖼️ Display {'ON' if s else 'OFF'}")
+            # не закрываем окно, а просто гасим вывод — так hotkeys продолжают работать
+
         # забираем новый кадр если есть
         try:
-            img = _view_queue.get(timeout=0.05)
+            img = _view_queue.get(timeout=0.02)
             last_img = img
             last_time = time.time()
         except Empty:
             pass
 
-        # если есть что показать — показываем, иначе — пустой экран
-        if last_img is not None:
-            cv2.imshow(VIEW_WINDOW, last_img)
-            # сбрасываем картинку после hold_sec
+        # подготовка холста
+        if last_img is not None and VIEW_ENABLED:
+            canvas = last_img.copy()
+            # наложим строку статуса поверх присланного кадра
+            cv2.putText(canvas, _status_line(), (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 230, 20), 2)
+            cv2.imshow(VIEW_WINDOW, canvas)
+            # сброс через hold_sec
             if time.time() - last_time > hold_sec:
                 last_img = None
         else:
-            # рисовать пустой кадр не обязательно каждую итерацию, достаточно держать окно живым
-            blank = np.zeros((300, 500, 3), dtype=np.uint8)
-            cv2.putText(blank, "Waiting for events... (press Q to close)",
-                        (15, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 180), 2)
-
-            # # === Отображение статуса и подсказок ===
-            # status_text = f"Status: {current_status}"
-            # cv2.putText(blank, status_text, (10, 30),
-            #             cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-            #
-            # help_text = "Waiting for events... (press Q=quit, SPACE=toggle/pause)"
-            # cv2.putText(blank, help_text, (10, blank.shape[0] - 10),
-            #             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
-            #
-            # cv2.imshow(VIEW_WINDOW, blank)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key in (ord('q'), ord('Q')):
-            _view_stop.set()
-            break
-
-        # if key == ord("q"):
-        #     break
-        # elif key == 32:  # Space
-        #     if current_status == "Idle":
-        #         current_status = "Primed"
-        #     else:
-        #         current_status = "Idle"
+            blank = np.zeros((320, 560, 3), dtype=np.uint8)
+            msg = "Display OFF" if not VIEW_ENABLED else "Waiting for events..."
+            cv2.putText(blank, f"{msg}", (15, 120),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (180, 180, 180), 2)
+            cv2.putText(
+                blank,
+                "Hotkeys: Q=quit | SPACE=Idle/Primed | A=alarm on/off | W=display on/off",
+                (15, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1
+            )
+            # текущий статус
+            cv2.putText(blank, _status_line(), (15, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 230, 20), 2)
+            cv2.imshow(VIEW_WINDOW, blank)
 
     cv2.destroyWindow(VIEW_WINDOW)
 
@@ -168,8 +222,12 @@ def show_frame(frame, camera_name, zones=None, center=None, label=None):
         if z: cv2.rectangle(out, (z[0], z[1]), (z[2], z[3]), (0, 0, 255), 2)
     if center:
         cv2.circle(out, center, 6, (255, 255, 0), -1)
+    # верхняя строка
     text = f"{camera_name} | {label or ''} | {now_ts()}"
     cv2.putText(out, text, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 230, 20), 2)
+    # дополнительная строка статуса
+    cv2.putText(out, _status_line(), (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+
     # не блокируемся на полной очереди
     try:
         _view_queue.put_nowait(out)
@@ -365,6 +423,9 @@ def detect_motion_and_objects(camera_name, rtsp_url, zones_for_cam):
                     start_rect = zones_for_cam.get("start")
                     finish_rect = zones_for_cam.get("finish")
 
+                    # <<< Глобальный режим: если Idle — не триггерим (но продолжаем следить за стадией)
+                    active = (_get_mode() == "Primed")
+
                     if start_rect and finish_rect:
                         if stage == "idle":
                             if in_zone((cx, cy), start_rect):
@@ -375,10 +436,11 @@ def detect_motion_and_objects(camera_name, rtsp_url, zones_for_cam):
                             if now - primed_since > DIRECTION_TIMEOUT_SEC:
                                 stage = "idle"
                             elif in_zone((cx, cy), finish_rect):
-                                if (now - last_trigger_time) >= RECOGNITION_DELAY_SEC:
+                                if active and (now - last_trigger_time) >= RECOGNITION_DELAY_SEC:
                                     ts = now_ts()
                                     logging.info(f"✅ {camera_name}: START→FINISH, {best['class']} ({best['conf']:.2f}), {ts}")
                                     play_alarm()
+                                    _mark_triggered()  # <<< подсветка статуса TRIGGERED
                                     # показ в UI-окне
                                     show_frame(frame2, camera_name, zones_for_cam, (cx, cy), "START→FINISH")
                                     # сохранение
@@ -397,10 +459,11 @@ def detect_motion_and_objects(camera_name, rtsp_url, zones_for_cam):
                                 stage = "idle"
                     else:
                         # зон нет — обычный триггер с задержкой
-                        if (time.time() - last_trigger_time) >= RECOGNITION_DELAY_SEC:
+                        if active and (time.time() - last_trigger_time) >= RECOGNITION_DELAY_SEC:
                             ts = now_ts()
                             logging.info(f"ℹ {camera_name}: детекция {best['class']} ({best['conf']:.2f}), {ts}")
                             play_alarm()
+                            _mark_triggered()
                             show_frame(frame2, camera_name, None, (cx, cy), "DETECTED")
                             if SAVE_FRAMES:
                                 fname = f"{camera_name}_{ts.replace(':','-')}_{best['class']}.jpg"
@@ -474,6 +537,7 @@ def main():
         ui_thread = threading.Thread(target=viewer_thread, daemon=True)
         ui_thread.start()
 
+    logging.info("🔥 Горячие клавиши в окне VIEWER: Q=выход | SPACE=Idle/Primed | A=звук ON/OFF | W=показ ON/OFF")
     logging.info(f"🔍 Камер: {len(cameras)}. Запускаю в {min(len(cameras), MAX_THREADS)} поток(ах)…")
 
     # Запуск обработки
