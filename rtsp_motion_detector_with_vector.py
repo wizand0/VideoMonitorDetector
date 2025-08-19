@@ -207,8 +207,8 @@ def viewer_thread():
         if last_img is not None and VIEW_ENABLED:
             canvas = last_img.copy()
             # наложим строку статуса поверх присланного кадра
-            cv2.putText(canvas, _status_line(), (10, 300),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 230, 20), 2)
+            # cv2.putText(canvas, _status_line(), (10, 400),
+            #             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (20, 230, 20), 2)
             cv2.imshow(VIEW_WINDOW, canvas)
             # сброс через hold_sec
             if time.time() - last_time > hold_sec:
@@ -217,7 +217,7 @@ def viewer_thread():
             blank = np.zeros((320, 560, 3), dtype=np.uint8)
             msg = "Display OFF" if not VIEW_ENABLED else "Waiting for events..."
             cv2.putText(blank, f"{msg}", (15, 120),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (180, 180, 180), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180, 180, 180), 2)
 
             hotkeys_text = [
                 "Hotkeys:",
@@ -259,9 +259,9 @@ def show_frame(frame, camera_name, zones=None, center=None, label=None):
         cv2.circle(out, center, 6, (255, 255, 0), -1)
     # верхняя строка
     text = f"{camera_name} | {label or ''} | {now_ts()}"
-    cv2.putText(out, text, (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 230, 20), 2)
+    cv2.putText(out, text, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 230, 20), 2)
     # дополнительная строка статуса
-    # cv2.putText(out, _status_line(), (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+    cv2.putText(out, _status_line(), (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
 
     # не блокируемся на полной очереди
     try:
