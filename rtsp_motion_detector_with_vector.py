@@ -1,5 +1,5 @@
 """
-rtsp_motion_detector_with_vector.py
+Rtsp_motion_detector_with_vector.py
 Реагирует только если человек прошёл из зоны START в зону FINISH.
 Зоны настраиваются клавишами в одном окне (без мыши).
 Есть безопасный показ последнего срабатывания на 2 секунды (отдельный UI-поток).
@@ -19,12 +19,12 @@ from queue import Queue, Empty
 import threading
 
 # ===================== НАСТРОЙКИ =====================
-SENSITIVITY = 25                  # порог бинаризации разности
-MIN_AREA = 800                    # минимальная площадь контура движения
-PLAYBACK_SPEED = 8                # чем выше, тем меньше нагрузка (обрабатываем каждый N-й кадр)
+SENSITIVITY = 25  # порог бинаризации разности
+MIN_AREA = 800  # минимальная площадь контура движения
+PLAYBACK_SPEED = 8  # чем выше, тем меньше нагрузка (обрабатываем каждый N-й кадр)
 SAVE_FRAMES = True
-RECOGNITION_DELAY_SEC = 4         # минимум секунд между триггерами/сохранениями
-DIRECTION_TIMEOUT_SEC = 8         # сколько секунд ждём FINISH после входа в START
+RECOGNITION_DELAY_SEC = 4  # минимум секунд между триггерами/сохранениями
+DIRECTION_TIMEOUT_SEC = 8  # сколько секунд ждём FINISH после входа в START
 OUTPUT_FILE = "rtsp_motions_log.csv"
 FRAMES_DIR = "rtsp_motion_frames"
 ZONES_FILE = "zones.json"
@@ -32,7 +32,7 @@ MAX_THREADS = 4
 YOLO_MODEL = "yolov8n.pt"
 CONF_THRESHOLD = 0.7
 ALARM_FILE = "icq.wav"
-TARGET_CLASSES = ["person"]       # добавь "cat","dog" при необходимости
+TARGET_CLASSES = ["person"]  # добавь "cat","dog" при необходимости
 
 # Предпросмотр зон при старте
 PREVIEW_ZONES = True
@@ -61,18 +61,21 @@ SHOW_WINDOW = True  # включаем UI-поток показа срабаты
 
 # <<< Глобальное состояние и блокировка для потокобезопасности
 _state_lock = threading.Lock()
-OP_MODE = "Primed"     # "Primed" — работает; "Idle" — пауза триггеров
-VIEW_ENABLED = True    # показ кадров включён/выключен горячей клавишей
+OP_MODE = "Primed"  # "Primed" — работает; "Idle" — пауза триггеров
+VIEW_ENABLED = True  # показ кадров включён/выключен горячей клавишей
 _last_trigger_mark_until = 0.0  # до какого времени писать "TRIGGERED" в статусе
+
 
 def _set_mode(new_mode: str):
     global OP_MODE
     with _state_lock:
         OP_MODE = new_mode
 
+
 def _get_mode() -> str:
     with _state_lock:
         return OP_MODE
+
 
 def _toggle_mode():
     with _state_lock:
@@ -80,11 +83,13 @@ def _toggle_mode():
         OP_MODE = "Idle" if OP_MODE == "Primed" else "Primed"
         return OP_MODE
 
+
 def _toggle_alarm():
     global PLAY_ALARM
     with _state_lock:
         PLAY_ALARM = not PLAY_ALARM
         return PLAY_ALARM
+
 
 def _toggle_view():
     global VIEW_ENABLED
@@ -92,10 +97,12 @@ def _toggle_view():
         VIEW_ENABLED = not VIEW_ENABLED
         return VIEW_ENABLED
 
+
 def _mark_triggered(duration_sec=2.0):
     global _last_trigger_mark_until
     with _state_lock:
         _last_trigger_mark_until = time.time() + duration_sec
+
 
 def _status_line():
     with _state_lock:
@@ -108,6 +115,7 @@ def _status_line():
         parts.append(trig)
     return " | ".join(parts)
 
+
 # YOLO
 logging.info("📦 Загружаю модель YOLOv8...")
 model = YOLO(YOLO_MODEL)
@@ -116,6 +124,7 @@ model = YOLO(YOLO_MODEL)
 if not os.path.exists(OUTPUT_FILE):
     with open(OUTPUT_FILE, mode="w", newline="", encoding="utf-8") as f:
         csv.writer(f).writerow(["camera", "timestamp", "class", "confidence"])
+
 
 # ===================== УТИЛИТЫ =====================
 def play_alarm():
@@ -126,8 +135,10 @@ def play_alarm():
     except Exception as e:
         logging.error(f"Не удалось проиграть сигнал: {e}")
 
+
 def now_ts() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
+
 
 def date_dir() -> str:
     d = time.strftime("%Y%m%d")
@@ -135,24 +146,31 @@ def date_dir() -> str:
     os.makedirs(p, exist_ok=True)
     return p
 
+
 def clamp_rect(x1, y1, x2, y2, w, h):
     x1, x2 = sorted((int(x1), int(x2)))
     y1, y2 = sorted((int(y1), int(y2)))
-    x1 = max(0, min(x1, w - 1));  x2 = max(0, min(x2, w - 1))
-    y1 = max(0, min(y1, h - 1));  y2 = max(0, min(y2, h - 1))
+    x1 = max(0, min(x1, w - 1))
+    x2 = max(0, min(x2, w - 1))
+    y1 = max(0, min(y1, h - 1))
+    y2 = max(0, min(y2, h - 1))
     return x1, y1, x2, y2
+
 
 def in_zone(point, rect):
     if not rect or len(rect) != 4:
         return False
     cx, cy = point
     x1, y1, x2, y2 = rect
-    x1, x2 = sorted((x1, x2)); y1, y2 = sorted((y1, y2))
+    x1, x2 = sorted((x1, x2))
+    y1, y2 = sorted((y1, y2))
     return x1 <= cx <= x2 and y1 <= cy <= y2
+
 
 # ===================== ОКНО-ПРОСМОТРЩИК (UI-поток) =====================
 _view_queue: "Queue[np.ndarray]" = Queue(maxsize=8)
 _view_stop = threading.Event()
+
 
 def viewer_thread():
     cv2.namedWindow(VIEW_WINDOW, cv2.WINDOW_NORMAL)
@@ -161,7 +179,7 @@ def viewer_thread():
     hold_sec = 2.0  # показываем кадр 2 секунды
 
     while not _view_stop.is_set():
-        # гор. клавиши читаем тут же
+        # Горячие клавиши читаем тут же
         key = cv2.waitKey(1) & 0xFF
         if key in (ord('q'), ord('Q')):
             _view_stop.set()
@@ -189,7 +207,7 @@ def viewer_thread():
         if last_img is not None and VIEW_ENABLED:
             canvas = last_img.copy()
             # наложим строку статуса поверх присланного кадра
-            cv2.putText(canvas, _status_line(), (10, 30),
+            cv2.putText(canvas, _status_line(), (10, 300),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 230, 20), 2)
             cv2.imshow(VIEW_WINDOW, canvas)
             # сброс через hold_sec
@@ -200,39 +218,57 @@ def viewer_thread():
             msg = "Display OFF" if not VIEW_ENABLED else "Waiting for events..."
             cv2.putText(blank, f"{msg}", (15, 120),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (180, 180, 180), 2)
-            cv2.putText(
-                blank,
-                "Hotkeys: Q=quit | SPACE=Idle/Primed | A=alarm on/off | W=display on/off",
-                (15, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1
-            )
+
+            hotkeys_text = [
+                "Hotkeys:",
+                "Q = quit   |   SPACE = Idle/Primed",
+                "A = alarm on/off   |   W = display on/off"
+            ]
+
+            y0 = 160
+            dy = 20  # шаг по вертикали
+            for i, line in enumerate(hotkeys_text):
+                y = y0 + i * dy
+                cv2.putText(blank, line, (15, y), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.55, (180, 180, 180), 1)
+
+            # cv2.putText(
+            #     blank,
+            #     "Hotkeys: Q=quit | SPACE=Idle/Primed | A=alarm on/off | W=display on/off",
+            #     (15, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1
+            # )
             # текущий статус
-            cv2.putText(blank, _status_line(), (15, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 230, 20), 2)
+            cv2.putText(blank, _status_line(), (15, 300),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (20, 230, 20), 2)
             cv2.imshow(VIEW_WINDOW, blank)
 
     cv2.destroyWindow(VIEW_WINDOW)
+
 
 def show_frame(frame, camera_name, zones=None, center=None, label=None):
     """Отправить кадр в окно просмотра (UI-поток сам покажет его ~2 сек)."""
     out = frame.copy()
     if zones:
         z = zones.get("start")
-        if z: cv2.rectangle(out, (z[0], z[1]), (z[2], z[3]), (0, 180, 0), 2)
+        if z:
+            cv2.rectangle(out, (z[0], z[1]), (z[2], z[3]), (0, 180, 0), 2)
         z = zones.get("finish")
-        if z: cv2.rectangle(out, (z[0], z[1]), (z[2], z[3]), (0, 0, 255), 2)
+        if z:
+            cv2.rectangle(out, (z[0], z[1]), (z[2], z[3]), (0, 0, 255), 2)
     if center:
         cv2.circle(out, center, 6, (255, 255, 0), -1)
     # верхняя строка
     text = f"{camera_name} | {label or ''} | {now_ts()}"
-    cv2.putText(out, text, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 230, 20), 2)
+    cv2.putText(out, text, (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 230, 20), 2)
     # дополнительная строка статуса
-    cv2.putText(out, _status_line(), (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+    # cv2.putText(out, _status_line(), (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
 
     # не блокируемся на полной очереди
     try:
         _view_queue.put_nowait(out)
-    except:
+    except Exception:
         pass
+
 
 # ===================== НАСТРОЙКА ЗОН (КЛАВИШАМИ) =====================
 def select_zone_keyboard(frame, title, max_w=1280, max_h=720):
@@ -263,25 +299,41 @@ def select_zone_keyboard(frame, title, max_w=1280, max_h=720):
         cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 255, 0), 2)
         cv2.putText(canvas, f"{title}", (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (50, 220, 50), 2)
         cv2.putText(canvas, "W/S/A/D move | I/K height +/- | L/J width +/- | R reset | Enter OK | Esc skip",
-                    (10, canvas.shape[0]-15), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2)
+                    (10, canvas.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
         cv2.imshow(SETUP_WINDOW, canvas)
 
         key = cv2.waitKey(10) & 0xFF
         if key in (13, 10):  # Enter
             break
-        if key == 27:       # Esc
+        if key == 27:  # Esc
             cv2.destroyWindow(SETUP_WINDOW)
             return None
 
         step = 10
-        if key in (ord('w'), ord('W')): y1 -= step; y2 -= step
-        if key in (ord('s'), ord('S')): y1 += step; y2 += step
-        if key in (ord('a'), ord('A')): x1 -= step; x2 -= step
-        if key in (ord('d'), ord('D')): x1 += step; x2 += step
-        if key in (ord('i'), ord('I')): y1 -= step; y2 += step
-        if key in (ord('k'), ord('K')): y1 += step; y2 -= step
-        if key in (ord('l'), ord('L')): x1 -= step; x2 += step
-        if key in (ord('j'), ord('J')): x1 += step; x2 -= step
+        if key in (ord('w'), ord('W')):
+            y1 -= step
+            y2 -= step
+        if key in (ord('s'), ord('S')):
+            y1 += step
+            y2 += step
+        if key in (ord('a'), ord('A')):
+            x1 -= step
+            x2 -= step
+        if key in (ord('d'), ord('D')):
+            x1 += step
+            x2 += step
+        if key in (ord('i'), ord('I')):
+            y1 -= step
+            y2 += step
+        if key in (ord('k'), ord('K')):
+            y1 += step
+            y2 -= step
+        if key in (ord('l'), ord('L')):
+            x1 -= step
+            x2 += step
+        if key in (ord('j'), ord('J')):
+            x1 += step
+            x2 -= step
         if key in (ord('r'), ord('R')):
             cw, ch = int(disp.shape[1] * 0.4), int(disp.shape[0] * 0.4)
             cx, cy = disp.shape[1] // 2, disp.shape[0] // 2
@@ -289,8 +341,10 @@ def select_zone_keyboard(frame, title, max_w=1280, max_h=720):
             x2, y2 = cx + cw // 2, cy + ch // 2
 
         # границы окна
-        x1 = max(0, min(x1, disp.shape[1]-2)); x2 = max(1, min(x2, disp.shape[1]-1))
-        y1 = max(0, min(y1, disp.shape[0]-2)); y2 = max(1, min(y2, disp.shape[0]-1))
+        x1 = max(0, min(x1, disp.shape[1] - 2))
+        x2 = max(1, min(x2, disp.shape[1] - 1))
+        y1 = max(0, min(y1, disp.shape[0] - 2))
+        y2 = max(1, min(y2, disp.shape[0] - 1))
 
     cv2.destroyWindow(SETUP_WINDOW)
 
@@ -299,6 +353,7 @@ def select_zone_keyboard(frame, title, max_w=1280, max_h=720):
     ex, ey = int(x2 / scale), int(y2 / scale)
     sx, sy, ex, ey = clamp_rect(sx, sy, ex, ey, w, h)
     return [sx, sy, ex, ey]
+
 
 def configure_zones(cameras: dict) -> dict:
     zones = {}
@@ -324,14 +379,16 @@ def configure_zones(cameras: dict) -> dict:
             zones[name] = {}
             logging.warning(f"⚠ Зоны для {name} заданы не полностью.")
 
-    with open(ZONES_FILE, "w", encoding="utf-8") as f:
-        json.dump(zones, f, indent=2, ensure_ascii=False)
+    with open(ZONES_FILE, "w", encoding="utf-8") as a:
+        json.dump(zones, a, indent=2, ensure_ascii=False)
     logging.info("✅ Зоны сохранены в zones.json")
     cv2.destroyAllWindows()
     return zones
 
+
 def preview_zones(cameras: dict, zones: dict):
-    if not PREVIEW_ZONES: return
+    if not PREVIEW_ZONES:
+        return
     for name, url in cameras.items():
         z = zones.get(name) or {}
         if "start" not in z or "finish" not in z:
@@ -341,11 +398,12 @@ def preview_zones(cameras: dict, zones: dict):
         cap.release()
         if not ok or frame is None:
             continue
-        sx1, sy1, sx2, sy2 = z["start"];  fx1, fy1, fx2, fy2 = z["finish"]
+        sx1, sy1, sx2, sy2 = z["start"]
+        fx1, fy1, fx2, fy2 = z["finish"]
         cv2.rectangle(frame, (sx1, sy1), (sx2, sy2), (0, 180, 0), 2)
         cv2.rectangle(frame, (fx1, fy1), (fx2, fy2), (0, 0, 255), 2)
-        cv2.putText(frame, "START", (sx1, max(0, sy1-8)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,180,0), 2)
-        cv2.putText(frame, "FINISH", (fx1, max(0, fy1-8)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
+        cv2.putText(frame, "START", (sx1, max(0, sy1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 180, 0), 2)
+        cv2.putText(frame, "FINISH", (fx1, max(0, fy1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
         win = f"PREVIEW_{name}"
         cv2.namedWindow(win, cv2.WINDOW_NORMAL)
         cv2.imshow(win, frame)
@@ -355,6 +413,7 @@ def preview_zones(cameras: dict, zones: dict):
                 break
         cv2.destroyWindow(win)
     cv2.destroyAllWindows()
+
 
 # ===================== ДЕТЕКТОР =====================
 def detect_motion_and_objects(camera_name, rtsp_url, zones_for_cam):
@@ -386,9 +445,11 @@ def detect_motion_and_objects(camera_name, rtsp_url, zones_for_cam):
             # пропуски кадров ради CPU
             if frame_count % PLAYBACK_SPEED != 0:
                 frame1 = frame2
-                if not cap.grab(): break
+                if not cap.grab():
+                    break
                 ok, frame2 = cap.retrieve()
-                if not ok: break
+                if not ok:
+                    break
                 frame_count += 1
                 continue
 
@@ -438,7 +499,8 @@ def detect_motion_and_objects(camera_name, rtsp_url, zones_for_cam):
                             elif in_zone((cx, cy), finish_rect):
                                 if active and (now - last_trigger_time) >= RECOGNITION_DELAY_SEC:
                                     ts = now_ts()
-                                    logging.info(f"✅ {camera_name}: START→FINISH, {best['class']} ({best['conf']:.2f}), {ts}")
+                                    logging.info(
+                                        f"✅ {camera_name}: START→FINISH, {best['class']} ({best['conf']:.2f}), {ts}")
                                     play_alarm()
                                     _mark_triggered()  # <<< подсветка статуса TRIGGERED
                                     # показ в UI-окне
@@ -451,32 +513,34 @@ def detect_motion_and_objects(camera_name, rtsp_url, zones_for_cam):
                                         cv2.rectangle(out, (sx1, sy1), (sx2, sy2), (0, 180, 0), 2)
                                         cv2.rectangle(out, (fx1, fy1), (fx2, fy2), (0, 0, 255), 2)
                                         cv2.circle(out, (cx, cy), 6, (255, 255, 0), -1)
-                                        fname = f"{camera_name}_{ts.replace(':','-')}_{best['class']}.jpg"
+                                        fname = f"{camera_name}_{ts.replace(':', '-')}_{best['class']}.jpg"
                                         cv2.imwrite(os.path.join(date_dir(), fname), out)
-                                    with open(OUTPUT_FILE, "a", newline="", encoding="utf-8") as f:
-                                        csv.writer(f).writerow([camera_name, ts, best["class"], f"{best['conf']:.2f}"])
+                                    with open(OUTPUT_FILE, "a", newline="", encoding="utf-8") as b:
+                                        csv.writer(b).writerow([camera_name, ts, best["class"], f"{best['conf']:.2f}"])
                                     last_trigger_time = now
                                 stage = "idle"
                     else:
                         # зон нет — обычный триггер с задержкой
                         if active and (time.time() - last_trigger_time) >= RECOGNITION_DELAY_SEC:
                             ts = now_ts()
-                            logging.info(f"ℹ {camera_name}: детекция {best['class']} ({best['conf']:.2f}), {ts}")
+                            logging.info(f"{camera_name}: детекция {best['class']} ({best['conf']:.2f}), {ts}")
                             play_alarm()
                             _mark_triggered()
                             show_frame(frame2, camera_name, None, (cx, cy), "DETECTED")
                             if SAVE_FRAMES:
-                                fname = f"{camera_name}_{ts.replace(':','-')}_{best['class']}.jpg"
+                                fname = f"{camera_name}_{ts.replace(':', '-')}_{best['class']}.jpg"
                                 cv2.imwrite(os.path.join(date_dir(), fname), frame2)
-                            with open(OUTPUT_FILE, "a", newline="", encoding="utf-8") as f:
-                                csv.writer(f).writerow([camera_name, ts, best["class"], f"{best['conf']:.2f}"])
+                            with open(OUTPUT_FILE, "a", newline="", encoding="utf-8") as h:
+                                csv.writer(h).writerow([camera_name, ts, best["class"], f"{best['conf']:.2f}"])
                             last_trigger_time = time.time()
 
             # следующий кадр
             frame1 = frame2
-            if not cap.grab(): break
+            if not cap.grab():
+                break
             ok, frame2 = cap.retrieve()
-            if not ok: break
+            if not ok:
+                break
             frame_count += 1
 
         cap.release()
@@ -484,13 +548,14 @@ def detect_motion_and_objects(camera_name, rtsp_url, zones_for_cam):
     except Exception as e:
         logging.exception(f"Ошибка при обработке {camera_name}: {e}")
 
+
 # ===================== MAIN =====================
 def main():
     global PLAY_ALARM, SHOW_WINDOW
 
     # Загрузка камер
-    with open("cameras.json", "r", encoding="utf-8") as f:
-        cameras = json.load(f)
+    with open("cameras.json", "r", encoding="utf-8") as c:
+        cameras = json.load(c)
     if not cameras:
         logging.error("❌ cameras.json пустой.")
         return
@@ -502,8 +567,8 @@ def main():
     zones = {}
     if os.path.exists(ZONES_FILE):
         try:
-            with open(ZONES_FILE, "r", encoding="utf-8") as f:
-                zones = json.load(f)
+            with open(ZONES_FILE, "r", encoding="utf-8") as d:
+                zones = json.load(d)
             need_setup = any(
                 (name not in zones) or ("start" not in zones.get(name, {})) or ("finish" not in zones.get(name, {}))
                 for name in cameras.keys()
@@ -548,8 +613,8 @@ def main():
                 z = zones.get(name, {})
                 futures.append(executor.submit(detect_motion_and_objects, name, url, z))
             # ждём все потоки
-            for f in futures:
-                f.result()
+            for g in futures:
+                g.result()
     finally:
         # корректно закрыть UI-поток
         _view_stop.set()
@@ -561,6 +626,7 @@ def main():
         cv2.destroyAllWindows()
 
     logging.info("✅ Работа завершена")
+
 
 if __name__ == "__main__":
     main()
