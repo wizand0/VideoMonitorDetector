@@ -4,3 +4,4 @@ tqdm
 ultralytics
 torch
 simpleaudio
+playsound==1.2.2
