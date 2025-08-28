@@ -5,8 +5,10 @@ import csv
 import time
 import logging
 import json
-import simpleaudio as sa
+import platform
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from queue import Queue, Empty
 from ultralytics import YOLO
 
 # ===================== НАСТРОЙКИ =====================
@@ -14,7 +16,6 @@ SENSITIVITY = 25
 MIN_AREA = 800
 PLAYBACK_SPEED = 8  # чем выше, тем меньше нагрузка
 SAVE_FRAMES = True
-SAVE_DELAY_SEC = 2
 RECOGNITION_DELAY_SEC = 4
 OUTPUT_FILE = "rtsp_motions_log.csv"
 FRAMES_DIR = "rtsp_motion_frames"
@@ -23,20 +24,13 @@ YOLO_MODEL = "yolov8n.pt"
 CONF_THRESHOLD = 0.7
 ALARM_FILE = "icq.wav"
 TARGET_CLASSES = ["person", "cat", "dog"]
-ALARM_COOLDOWN = 6  # задержка перед повторным сигналом
-
-# Окно для показа движения
-DISPLAY_WINDOW_NAME = "Обнаружено движение"
-DISPLAY_DURATION = 3  # секунды
-DISPLAY_WIDTH = 800
-DISPLAY_HEIGHT = 600
 
 # Логгер
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[
-        logging.FileHandler("motion_debug.log", encoding="utf-8"),
+        logging.FileHandler("motion_ui_debug.log", encoding="utf-8"),
         logging.StreamHandler()
     ]
 )
@@ -44,81 +38,167 @@ logging.basicConfig(
 # Подготовка директорий
 os.makedirs(FRAMES_DIR, exist_ok=True)
 
-# Глобальные переменные
-last_detection = {}  # {camera_name: {"class": str, "time": float}}
-last_display_time = 0
-display_frame = np.zeros((DISPLAY_HEIGHT, DISPLAY_WIDTH, 3), dtype=np.uint8)
-SHOW_WINDOW = False
+# ===================== Глобальные флаги и состояние =====================
 PLAY_ALARM = False
+VIEW_ENABLED = True
+OP_MODE = "Primed"  # Idle / Primed
+_last_trigger_mark_until = 0.0
+_state_lock = threading.Lock()
 
-# Загрузка YOLO
+_view_queue: "Queue[np.ndarray]" = Queue(maxsize=8)
+_view_stop = threading.Event()
+
+# ===================== Аудио =====================
+if platform.system() == "Linux":
+    from playsound import playsound
+    def play_alarm():
+        if not PLAY_ALARM:
+            return
+        try:
+            playsound(ALARM_FILE, block=False)
+        except Exception as e:
+            logging.error(f"Не удалось проиграть сигнал (Linux): {e}")
+else:
+    import simpleaudio as sa
+    def play_alarm():
+        if not PLAY_ALARM:
+            return
+        try:
+            sa.WaveObject.from_wave_file(ALARM_FILE).play()
+        except Exception as e:
+            logging.error(f"Не удалось проиграть сигнал (Win): {e}")
+
+# ===================== Утилиты =====================
+def now_ts():
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+def date_dir():
+    d = time.strftime("%Y%m%d")
+    p = os.path.join(FRAMES_DIR, d)
+    os.makedirs(p, exist_ok=True)
+    return p
+
+def _status_line():
+    with _state_lock:
+        mode = OP_MODE
+        alarm = "ON" if PLAY_ALARM else "OFF"
+        view = "ON" if VIEW_ENABLED else "OFF"
+        trig = "TRIGGERED" if time.time() < _last_trigger_mark_until else ""
+    parts = [f"Mode: {mode}", f"Alarm: {alarm}", f"Display: {view}"]
+    if trig:
+        parts.append(trig)
+    return " | ".join(parts)
+
+def _toggle_mode():
+    global OP_MODE
+    with _state_lock:
+        OP_MODE = "Idle" if OP_MODE == "Primed" else "Primed"
+        return OP_MODE
+
+def _toggle_alarm():
+    global PLAY_ALARM
+    with _state_lock:
+        PLAY_ALARM = not PLAY_ALARM
+        return PLAY_ALARM
+
+def _toggle_view():
+    global VIEW_ENABLED
+    with _state_lock:
+        VIEW_ENABLED = not VIEW_ENABLED
+        return VIEW_ENABLED
+
+def _mark_triggered(duration_sec=2.0):
+    global _last_trigger_mark_until
+    with _state_lock:
+        _last_trigger_mark_until = time.time() + duration_sec
+
+# ===================== UI‑поток =====================
+def viewer_thread():
+    cv2.namedWindow("VIEWER", cv2.WINDOW_NORMAL)
+    last_img = None
+    last_time = 0.0
+    hold_sec = 2.0
+
+    while not _view_stop.is_set():
+        key = cv2.waitKey(1) & 0xFF
+        if key in (ord('q'), ord('Q')):
+            _view_stop.set()
+            break
+        elif key == 32:
+            logging.info(f"🔄 Mode → {_toggle_mode()}")
+        elif key in (ord('a'), ord('A')):
+            logging.info(f"🔔 Alarm {'ON' if _toggle_alarm() else 'OFF'}")
+        elif key in (ord('w'), ord('W')):
+            logging.info(f"🖼️ Display {'ON' if _toggle_view() else 'OFF'}")
+
+        try:
+            img = _view_queue.get(timeout=0.02)
+            last_img = img
+            last_time = time.time()
+        except Empty:
+            pass
+
+        if last_img is not None and VIEW_ENABLED:
+            canvas = last_img.copy()
+            cv2.putText(canvas, _status_line(), (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+            cv2.imshow("VIEWER", canvas)
+            if time.time() - last_time > hold_sec:
+                last_img = None
+        else:
+            blank = np.zeros((320, 560, 3), dtype=np.uint8)
+            msg = "Display OFF" if not VIEW_ENABLED else "Waiting for events..."
+            cv2.putText(blank, msg, (15, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180, 180, 180), 2)
+            cv2.putText(blank, _status_line(), (15, 200), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (20, 230, 20), 2)
+            cv2.imshow("VIEWER", blank)
+
+    cv2.destroyWindow("VIEWER")
+
+def show_frame(frame, camera_name, label=None):
+    out = frame.copy()
+    text = f"{camera_name} | {label or ''} | {now_ts()}"
+    cv2.putText(out, text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 230, 20), 2)
+    try:
+        _view_queue.put_nowait(out)
+    except Exception:
+        pass
+
+# ===================== YOLO =====================
 logging.info("📦 Загружаю модель YOLOv8...")
 model = YOLO(YOLO_MODEL)
 
-# Подготовка CSV
 if not os.path.exists(OUTPUT_FILE):
-    with open(OUTPUT_FILE, mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["camera", "timestamp", "class", "confidence"])
+    with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerow(["camera", "timestamp", "class", "confidence"])
 
-
-def play_alarm():
-    if not PLAY_ALARM:
-        return
-    try:
-        wave_obj = sa.WaveObject.from_wave_file(ALARM_FILE)
-        wave_obj.play()
-    except Exception as e:
-        logging.error(f"Не удалось проиграть сигнал: {e}")
-
-
-def update_display(frame):
-    """Обновляет содержимое общего окна."""
-    global last_display_time, display_frame
-    if SHOW_WINDOW:
-        resized = cv2.resize(frame, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
-        display_frame = resized
-        last_display_time = time.time()
-
-
-def display_loop():
-    """Постоянно обновляет общее окно, пока идёт работа."""
-    while SHOW_WINDOW:
-        now = time.time()
-        if now - last_display_time > DISPLAY_DURATION:
-            frame_to_show = np.zeros((DISPLAY_HEIGHT, DISPLAY_WIDTH, 3), dtype=np.uint8)
-        else:
-            frame_to_show = display_frame
-        cv2.imshow(DISPLAY_WINDOW_NAME, frame_to_show)
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
-    cv2.destroyAllWindows()
-
-
+# ===================== ДЕТЕКТОР =====================
 def detect_motion_and_objects(camera_name, rtsp_url):
-    global last_detection
     try:
-        logging.info(f"▶ Подключаюсь к камере {camera_name}")
         cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
         if not cap.isOpened():
             logging.error(f"❌ Не удалось подключиться к {camera_name}")
             return
 
         ret, frame1 = cap.read()
-        ret, frame2 = cap.read()
+        ret2, frame2 = cap.read()
+        if not ret or not ret2:
+            cap.release()
+            return
 
-        last_save_time = 0
-        last_recognition_time = 0
+        last_trigger_time = 0.0
         frame_count = 0
 
-        while ret:
+        while True:
             if frame_count % PLAYBACK_SPEED != 0:
                 frame1 = frame2
-                ret, frame2 = cap.read()
+                if not cap.grab():
+                    break
+                ok, frame2 = cap.retrieve()
+                if not ok:
+                    break
                 frame_count += 1
                 continue
 
-            # Анализ движения на уменьшенных кадрах для экономии CPU
             small1 = cv2.resize(frame1, (640, 360))
             small2 = cv2.resize(frame2, (640, 360))
             diff = cv2.absdiff(small1, small2)
@@ -127,13 +207,9 @@ def detect_motion_and_objects(camera_name, rtsp_url):
             _, thresh = cv2.threshold(blur, SENSITIVITY, 255, cv2.THRESH_BINARY)
             dilated = cv2.dilate(thresh, None, iterations=3)
             contours, _ = cv2.findContours(dilated, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-
             motion_detected = any(cv2.contourArea(c) >= MIN_AREA for c in contours)
 
-            if motion_detected and (time.time() - last_recognition_time >= RECOGNITION_DELAY_SEC):
-                last_recognition_time = time.time()
-
-                # Запуск YOLO
+            if motion_detected:
                 results = model(frame2, verbose=False)[0]
                 for box in results.boxes:
                     cls_id = int(box.cls[0])
@@ -141,85 +217,80 @@ def detect_motion_and_objects(camera_name, rtsp_url):
                     conf = float(box.conf[0])
 
                     if class_name in TARGET_CLASSES and conf >= CONF_THRESHOLD:
-                        ts = time.strftime("%Y-%m-%d %H:%M:%S")
-                        logging.info(f"🧍 {class_name} ({conf:.2f}) на {camera_name} в {ts}")
-
-                        # Анти-спам
-                        prev = last_detection.get(camera_name, {})
-                        if (prev.get("class") != class_name) or (time.time() - prev.get("time", 0) > ALARM_COOLDOWN):
+                        now = time.time()
+                        if OP_MODE == "Primed" and (now - last_trigger_time) >= RECOGNITION_DELAY_SEC:
+                            ts = now_ts()
+                            logging.info(f"✅ {camera_name}: {class_name} ({conf:.2f}), {ts}")
                             play_alarm()
-                            last_detection[camera_name] = {"class": class_name, "time": time.time()}
+                            _mark_triggered()
+                            show_frame(frame2, camera_name, class_name)
 
-                        # Показ кадра в окне
-                        update_display(frame2)
+                            if SAVE_FRAMES:
+                                fname = f"{camera_name}_{ts.replace(':', '-')}_{class_name}.jpg"
+                                cv2.imwrite(os.path.join(date_dir(), fname), frame2)
 
-                        # Сохранение кадра
-                        # if SAVE_FRAMES and (time.time() - last_save_time >= SAVE_DELAY_SEC):
-                        #     frame_file = os.path.join(FRAMES_DIR, f"{camera_name}_{ts.replace(':','-')}_{class_name}.jpg")
-                        #     cv2.imwrite(frame_file, frame2)
-                        #     last_save_time = time.time()
+                            with open(OUTPUT_FILE, "a", newline="", encoding="utf-8") as f:
+                                csv.writer(f).writerow([camera_name, ts, class_name, f"{conf:.2f}"])
 
-                        # сохранение кадров в поддерикторию с именем в виде текущей даты
-                        if SAVE_FRAMES and (time.time() - last_save_time >= SAVE_DELAY_SEC):
-                            date_dir = time.strftime("%Y%m%d")  # формат 20250818
-                            save_dir = os.path.join(FRAMES_DIR, date_dir)
-                            os.makedirs(save_dir, exist_ok=True)
-
-                            frame_file = os.path.join(
-                                save_dir,
-                                f"{camera_name}_{ts.replace(':', '-')}_{class_name}.jpg"
-                            )
-                            cv2.imwrite(frame_file, frame2)
-                            last_save_time = time.time()
-
-                        # Запись в CSV
-                        with open(OUTPUT_FILE, mode="a", newline="", encoding="utf-8") as f:
-                            writer = csv.writer(f)
-                            writer.writerow([camera_name, ts, class_name, f"{conf:.2f}"])
+                            last_trigger_time = now
                         break
 
             frame1 = frame2
-            ret, frame2 = cap.read()
+            if not cap.grab():
+                break
+            ok, frame2 = cap.retrieve()
+            if not ok:
+                break
             frame_count += 1
 
         cap.release()
 
     except Exception as e:
-        logging.error(f"Ошибка при обработке {camera_name}: {e}")
+        logging.exception(f"Ошибка при обработке {camera_name}: {e}")
 
-
+# ===================== MAIN =====================
 def main():
-    global SHOW_WINDOW, PLAY_ALARM
+    global PLAY_ALARM, VIEW_ENABLED
 
-    # Вопросы при старте
-    PLAY_ALARM = input("Проигрывать звуковое уведомление? (y/n): ").strip().lower() == "y"
-    SHOW_WINDOW = input("Показывать кадры с движением? (y/n): ").strip().lower() == "y"
-
-    # Загрузка камер
-    with open("cameras.json", "r", encoding="utf-8") as f:
-        cameras = json.load(f)
-
-    # Проверка числа камер
-    if len(cameras) > MAX_THREADS:
-        logging.error(f"В конфиге {len(cameras)} камер, но можно обрабатывать максимум {MAX_THREADS} одновременно!")
+    with open("cameras.json", "r", encoding="utf-8") as c:
+        cameras = json.load(c)
+    if not cameras:
+        logging.error("❌ cameras.json пустой.")
         return
 
-    logging.info(f"🔍 Найдено {len(cameras)} камер. Запускаю в {len(cameras)} поток(ах)...")
+    try:
+        PLAY_ALARM = input("Проигрывать звуковое уведомление? (y/n): ").strip().lower() == "y"
+    except Exception:
+        PLAY_ALARM = False
+    try:
+        VIEW_ENABLED = input("Показывать кадры при срабатывании? (y/n): ").strip().lower() == "y"
+    except Exception:
+        VIEW_ENABLED = True
 
-    # Запуск потока показа окна, если нужно
-    if SHOW_WINDOW:
-        cv2.namedWindow(DISPLAY_WINDOW_NAME, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(DISPLAY_WINDOW_NAME, DISPLAY_WIDTH, DISPLAY_HEIGHT)
-        import threading
-        threading.Thread(target=display_loop, daemon=True).start()
+    ui_thread = None
+    if VIEW_ENABLED:
+        _view_stop.clear()
+        ui_thread = threading.Thread(target=viewer_thread, daemon=True)
+        ui_thread.start()
 
-    # Запуск камер
-    with ThreadPoolExecutor(max_workers=len(cameras)) as executor:
-        for name, url in cameras.items():
-            executor.submit(detect_motion_and_objects, name, url)
+    logging.info("🔥 Горячие клавиши: Q=выход | SPACE=Idle/Primed | A=звук ON/OFF | W=показ ON/OFF")
+    logging.info(f"🔍 Камер: {len(cameras)}. Запускаю в {min(len(cameras), MAX_THREADS)} поток(ах)…")
+
+    try:
+        with ThreadPoolExecutor(max_workers=min(len(cameras), MAX_THREADS)) as executor:
+            futures = [executor.submit(detect_motion_and_objects, name, url) for name, url in cameras.items()]
+            for g in futures:
+                g.result()
+    finally:
+        _view_stop.set()
+        try:
+            if ui_thread:
+                ui_thread.join(timeout=2)
+        except Exception:
+            pass
+        cv2.destroyAllWindows()
 
     logging.info("✅ Работа завершена")
-
 
 if __name__ == "__main__":
     main()

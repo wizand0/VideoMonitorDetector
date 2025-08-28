@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from ultralytics import YOLO
 from queue import Queue, Empty
 import threading
+import platform
 
 # ===================== НАСТРОЙКИ =====================
 SENSITIVITY = 25  # порог бинаризации разности
@@ -64,6 +65,29 @@ _state_lock = threading.Lock()
 OP_MODE = "Primed"  # "Primed" — работает; "Idle" — пауза триггеров
 VIEW_ENABLED = True  # показ кадров включён/выключен горячей клавишей
 _last_trigger_mark_until = 0.0  # до какого времени писать "TRIGGERED" в статусе
+
+
+if platform.system() == "Linux":
+    from playsound import playsound
+
+    def play_alarm():
+        if not PLAY_ALARM:
+            return
+        try:
+            playsound(ALARM_FILE, block=False)
+        except Exception as e:
+            logging.error(f"Не удалось проиграть сигнал (Linux): {e}")
+
+else:
+    import simpleaudio as sa
+
+    def play_alarm():
+        if not PLAY_ALARM:
+            return
+        try:
+            sa.WaveObject.from_wave_file(ALARM_FILE).play()
+        except Exception as e:
+            logging.error(f"Не удалось проиграть сигнал (Win): {e}")
 
 
 def _set_mode(new_mode: str):
